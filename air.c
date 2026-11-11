@@ -1,7 +1,5 @@
 #include "common.h"
 
-#include <stdlib.h>
-
 static void
 spin_until(uint64_t end)
 {
@@ -12,14 +10,6 @@ static uint64_t
 next_symbol(void)
 {
     return (now() / SYMBOL_NS + 1) * SYMBOL_NS;
-}
-
-static int
-cmp_double(const void *a, const void *b)
-{
-    double x = *(const double *)a;
-    double y = *(const double *)b;
-    return (x > y) - (x < y);
 }
 
 static void
@@ -35,6 +25,20 @@ idle_until(uint64_t end)
         nanosleep(&d, NULL);
     }
     spin_until(end);
+}
+
+static void
+sort_doubles(double *values, size_t count)
+{
+    for (size_t i = 1; i < count; i++) {
+        double value = values[i];
+        size_t j = i;
+        while (j && values[j - 1] > value) {
+            values[j] = values[j - 1];
+            j--;
+        }
+        values[j] = value;
+    }
 }
 
 static int
@@ -70,7 +74,7 @@ rx_half(uint64_t start, uint64_t end, double *out)
     if (count < 2) {
         return 0;
     }
-    qsort(samples, count, sizeof samples[0], cmp_double);
+    sort_doubles(samples, count);
     *out = 0.5 * (samples[(count - 1) / 2] + samples[count / 2]);
     return 1;
 }
@@ -237,7 +241,7 @@ carrier_clear(double w[BUSY_SYMBOLS])
     if (w[BUSY_SYMBOLS - 1] > BUSY_RATIO) {
         return 0;
     }
-    qsort(w, BUSY_SYMBOLS, sizeof w[0], cmp_double);
+    sort_doubles(w, BUSY_SYMBOLS);
     return w[BUSY_SYMBOLS / 2] <= BUSY_RATIO;
 }
 
