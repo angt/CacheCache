@@ -200,23 +200,30 @@ hear(struct frame *f, uint64_t quiet, uint64_t deadline)
     return receive_air(f, quiet, deadline, 0, NULL) > 0;
 }
 
+size_t
+air_encode(uint8_t *out, const uint8_t *in, size_t n)
+{
+    size_t nb = 0;
+    out[nb++] = 0;
+    for (unsigned i = 0; i < 14; i++) {
+        out[nb++] = (SYNC >> i) & 1;
+    }
+    for (unsigned i = 0; i < 8; i++) {
+        out[nb++] = (n >> i) & 1;
+    }
+    for (size_t i = 0; i < n; i++) {
+        for (unsigned j = 0; j < 8; j++) {
+            out[nb++] = (in[i] >> j) & 1;
+        }
+    }
+    return nb;
+}
+
 static int
 emit_bits(const uint8_t *bytes, size_t n, uint64_t at, uint64_t deadline)
 {
     uint8_t bits[8 * FRAME_MAX + 32];
-    size_t nb = 0;
-    bits[nb++] = 0;
-    for (unsigned i = 0; i < 14; i++) {
-        bits[nb++] = SYNC >> i & 1;
-    }
-    for (unsigned i = 0; i < 8; i++) {
-        bits[nb++] = n >> i & 1;
-    }
-    for (size_t i = 0; i < n; i++) {
-        for (unsigned j = 0; j < 8; j++) {
-            bits[nb++] = bytes[i] >> j & 1;
-        }
-    }
+    size_t nb = air_encode(bits, bytes, n);
     for (size_t i = 0; i < nb; i++, at += SYMBOL_NS) {
         if (cc.stop || at > deadline || SYMBOL_NS > deadline - at) {
             return 0;

@@ -153,6 +153,7 @@ void die(const char *what, int err);
 void __attribute__((format(printf, 1, 2))) dbg(const char *fmt, ...);
 uint64_t now(void);
 uint64_t mix(uint64_t x);
+size_t air_encode(uint8_t *out, const uint8_t *in, size_t n);
 
 int seq_after(uint16_t a, uint16_t b);
 int seq_before(uint16_t a, uint16_t b);
