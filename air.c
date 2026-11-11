@@ -41,6 +41,13 @@ sort_doubles(double *values, size_t count)
     }
 }
 
+double
+air_median(double *values, size_t count)
+{
+    sort_doubles(values, count);
+    return 0.5 * (values[(count - 1) / 2] + values[count / 2]);
+}
+
 static int
 rx_half(uint64_t start, uint64_t end, double *out)
 {
@@ -74,8 +81,7 @@ rx_half(uint64_t start, uint64_t end, double *out)
     if (count < 2) {
         return 0;
     }
-    sort_doubles(samples, count);
-    *out = 0.5 * (samples[(count - 1) / 2] + samples[count / 2]);
+    *out = air_median(samples, count);
     return 1;
 }
 
@@ -248,8 +254,7 @@ carrier_clear(double w[BUSY_SYMBOLS])
     if (w[BUSY_SYMBOLS - 1] > BUSY_RATIO) {
         return 0;
     }
-    sort_doubles(w, BUSY_SYMBOLS);
-    return w[BUSY_SYMBOLS / 2] <= BUSY_RATIO;
+    return air_median(w, BUSY_SYMBOLS) <= BUSY_RATIO;
 }
 
 static int
