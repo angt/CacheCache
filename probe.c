@@ -67,26 +67,14 @@ allocate(size_t size)
 void
 modem_open(void)
 {
-    size_t n = PROBE_BYTES / 64;
-    uint32_t *order = malloc(n * sizeof *order);
+    size_t lines = PROBE_BYTES / 64;
+    uint32_t *order = malloc(lines * sizeof *order);
     if (!order) {
         die("malloc", errno);
     }
     cc.mdm.ring = allocate(PROBE_BYTES);
-    for (uint32_t i = 0; i < n; i++) {
-        order[i] = i;
-    }
-    for (uint32_t i = n - 1; i > 0; i--) {
-        uint32_t j = (uint32_t)mix(i) % (i + 1);
-        uint32_t tmp = order[i];
-        order[i] = order[j];
-        order[j] = tmp;
-    }
-    for (uint32_t i = 0; i < n; i++) {
-        cc.mdm.ring[order[i] * 16] = order[(i + 1) % n] * 16;
-    }
+    cc.mdm.cur = air_ring(cc.mdm.ring, order, lines, cc.chat.id);
     free(order);
-    cc.mdm.cur = cc.chat.id % n * 16;
     for (size_t i = 0; i < SWEEP_MAX; i++) {
         cc.mdm.wk[i].buf = allocate(SWEEP_BYTES);
         int err = pthread_create(&cc.mdm.wk[i].tid, NULL, sweep, cc.mdm.wk[i].buf);

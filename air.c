@@ -48,6 +48,24 @@ air_median(double *values, size_t count)
     return 0.5 * (values[(count - 1) / 2] + values[count / 2]);
 }
 
+uint32_t
+air_ring(volatile uint32_t *ring, uint32_t *order, size_t lines, uint32_t start)
+{
+    for (size_t i = 0; i < lines; i++) {
+        order[i] = i;
+    }
+    for (size_t i = lines - 1; i > 0; i--) {
+        size_t j = (uint32_t)mix(i) % (i + 1);
+        uint32_t tmp = order[i];
+        order[i] = order[j];
+        order[j] = tmp;
+    }
+    for (size_t i = 0; i < lines; i++) {
+        ring[order[i] * 16] = order[(i + 1) % lines] * 16;
+    }
+    return start % lines * 16;
+}
+
 static int
 rx_half(uint64_t start, uint64_t end, double *out)
 {

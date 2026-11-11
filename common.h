@@ -155,6 +155,7 @@ uint64_t now(void);
 uint64_t mix(uint64_t x);
 size_t air_encode(uint8_t *out, const uint8_t *in, size_t n);
 double air_median(double *values, size_t count);
+uint32_t air_ring(volatile uint32_t *ring, uint32_t *order, size_t lines, uint32_t start);
 
 int seq_after(uint16_t a, uint16_t b);
 int seq_before(uint16_t a, uint16_t b);
