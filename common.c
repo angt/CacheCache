@@ -44,24 +44,3 @@ now(void)
     clock_gettime(CLOCK_MONOTONIC, &t);
     return t.tv_sec * UINT64_C(1000000000) + t.tv_nsec;
 }
-
-uint64_t
-mix(uint64_t x)
-{
-    x += UINT64_C(0x9E3779B97F4A7C15);
-    x = (x ^ (x >> 30)) * UINT64_C(0xBF58476D1CE4E5B9);
-    x = (x ^ (x >> 27)) * UINT64_C(0x94D049BB133111EB);
-    return x ^ (x >> 31);
-}
-
-int
-text_valid(const void *v, size_t n)
-{
-    const uint8_t *p = v;
-    for (size_t i = 0; i < n; i++) {
-        if (p[i] < 32 || p[i] == 127) {
-            return 0;
-        }
-    }
-    return 1;
-}

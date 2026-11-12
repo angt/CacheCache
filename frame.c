@@ -3,6 +3,18 @@
 #include <inttypes.h>
 #include <string.h>
 
+int
+text_valid(const void *v, size_t n)
+{
+    const uint8_t *p = v;
+    for (size_t i = 0; i < n; i++) {
+        if (p[i] < 32 || p[i] == 127) {
+            return 0;
+        }
+    }
+    return 1;
+}
+
 struct remote *
 receive(struct chat *c, const struct frame *f, uint64_t slot)
 {

@@ -152,7 +152,7 @@ extern struct state cc;
 void die(const char *what, int err);
 void __attribute__((format(printf, 1, 2))) dbg(const char *fmt, ...);
 uint64_t now(void);
-uint64_t mix(uint64_t x);
+
 size_t air_encode(uint8_t *out, const uint8_t *in, size_t n);
 double air_median(double *values, size_t count);
 uint32_t air_ring(volatile uint32_t *ring, uint32_t *order, size_t lines, uint32_t start);
@@ -196,5 +196,14 @@ int hear(struct frame *f, uint64_t quiet, uint64_t deadline);
 int emit(const struct frame *f, struct frame *incoming, uint64_t slot);
 
 uint32_t crc32(const uint8_t *p, size_t n);
+
+static inline uint64_t
+mix(uint64_t x)
+{
+    x += UINT64_C(0x9E3779B97F4A7C15);
+    x = (x ^ (x >> 30)) * UINT64_C(0xBF58476D1CE4E5B9);
+    x = (x ^ (x >> 27)) * UINT64_C(0x94D049BB133111EB);
+    return x ^ (x >> 31);
+}
 
 #endif
