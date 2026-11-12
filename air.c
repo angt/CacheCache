@@ -1,5 +1,23 @@
 #include "common.h"
 
+uint32_t
+air_read32(const volatile uint32_t *p)
+{
+    return *p;
+}
+
+void
+air_read64(const volatile void *p)
+{
+    (void)*(const volatile uint64_t *)p;
+}
+
+void
+air_write32(volatile uint32_t *p, uint32_t value)
+{
+    *p = value;
+}
+
 size_t
 air_encode(uint8_t *out, const uint8_t *in, size_t n)
 {
@@ -54,7 +72,7 @@ air_ring(volatile uint32_t *ring, uint32_t *order, size_t lines, uint32_t start)
         order[j] = tmp;
     }
     for (size_t i = 0; i < lines; i++) {
-        ring[order[i] * 16] = order[(i + 1) % lines] * 16;
+        air_write32(&ring[order[i] * 16], order[(i + 1) % lines] * 16);
     }
     return start % lines * 16;
 }

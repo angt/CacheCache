@@ -52,7 +52,7 @@ rx_half(uint64_t start, uint64_t end, double *out)
         uint64_t elapsed = t0;
         while (hops < RX_BATCH_HOPS) {
             for (size_t j = 0; j < 32; j++) {
-                cur = cc.mdm.ring[cur];
+                cur = air_read32(&cc.mdm.ring[cur]);
             }
             hops += 32;
             elapsed = now();
@@ -303,7 +303,7 @@ sweep(void *arg)
                 if (!(k & 255) && k && now() >= until) {
                     break;
                 }
-                (void)*(volatile uint64_t *)(buf + off);
+                air_read64(buf + off);
                 off += 64;
                 if (off >= SWEEP_BYTES) {
                     off = 0;
