@@ -114,28 +114,32 @@ restore_terminal(void)
 }
 
 static void
-submit(struct chat *c)
+submit(void)
 {
-    char edit[LINE_BYTES];
     pthread_mutex_lock(&cc.con.mx);
     size_t len = cc.con.nedit;
-    int rejected = cc.con.nover;
-    memcpy(edit, cc.con.edit, len);
+    if (len) {
+        struct con_line *line = malloc(sizeof *line);
+        if (!line) {
+            die("malloc", errno);
+        }
+        line->next = NULL;
+        line->len = len;
+        line->rejected = !!cc.con.nover;
+        memcpy(line->data, cc.con.edit, len);
+        if (cc.con.line_tail) {
+            cc.con.line_tail->next = line;
+        } else {
+            cc.con.line_head = line;
+        }
+        cc.con.line_tail = line;
+    }
     cc.con.nedit = cc.con.nover = 0;
     pthread_mutex_unlock(&cc.con.mx);
-    if (rejected) {
-        con_post("line rejected: more than %d bytes", LINE_BYTES);
-    } else if (len && enqueue(c, edit, len)) {
-        char record[OUT_TEXT];
-        con_line(record, edit, len);
-        con_post("%s", record);
-    } else if (len) {
-        con_post("line rejected: queue full");
-    }
 }
 
 static void
-con_key(struct chat *c, unsigned char ch)
+con_key(unsigned char ch)
 {
     if (cc.con.raw && ch == 20) {
         cc.con.req = 1;
@@ -144,7 +148,7 @@ con_key(struct chat *c, unsigned char ch)
     if (cc.con.raw && ch == 4) {
         cc.stop = -1;
     } else if (ch == '\n' || ch == '\r') {
-        submit(c);
+        submit();
     } else if (cc.con.raw && (ch == 8 || ch == 127)) {
         pthread_mutex_lock(&cc.con.mx);
         if (cc.con.nover) {
@@ -170,39 +174,30 @@ con_key(struct chat *c, unsigned char ch)
 void
 con_input(struct chat *c)
 {
-    if (cc.con.eof) {
-        return;
-    }
-    struct pollfd pfd = { STDIN_FILENO, POLLIN, 0 };
-    int ready = poll(&pfd, 1, 0);
-    if (ready < 0) {
-        if (errno != EINTR) {
-            perror("poll");
-            cc.stop = -2;
+    for (;;) {
+        pthread_mutex_lock(&cc.con.mx);
+        struct con_line *line = cc.con.line_head;
+        if (line) {
+            cc.con.line_head = line->next;
+            if (!cc.con.line_head) {
+                cc.con.line_tail = NULL;
+            }
         }
-        return;
-    }
-    if (!ready || !pfd.revents) {
-        return;
-    }
-    unsigned char buf[256];
-    ssize_t n = read(STDIN_FILENO, buf, sizeof buf);
-    if (n < 0) {
-        if (errno != EINTR && errno != EAGAIN) {
-            perror("read");
-            cc.stop = -2;
+        pthread_mutex_unlock(&cc.con.mx);
+        if (!line) {
+            return;
         }
-        return;
-    }
-    if (!n) {
-        submit(c);
-        cc.con.eof = 1;
-    } else {
-        for (ssize_t i = 0; i < n && !cc.stop && !cc.con.eof; i++) {
-            con_key(c, buf[i]);
+        if (line->rejected) {
+            con_post("line rejected: more than %d bytes", LINE_BYTES);
+        } else if (enqueue(c, line->data, line->len)) {
+            char record[OUT_TEXT];
+            con_line(record, line->data, line->len);
+            con_post("%s", record);
+        } else {
+            con_post("line rejected: queue full");
         }
+        free(line);
     }
-    con_wake();
 }
 
 static void *
@@ -214,8 +209,11 @@ console(void *arg)
         if (cc.con.done) {
             break;
         }
-        struct pollfd pfd = { cc.con.wake[0], POLLIN, 0 };
-        if (poll(&pfd, 1, -1) < 0) {
+        struct pollfd pfd[2] = {
+            {cc.con.eof ? -1 : STDIN_FILENO, POLLIN, 0},
+            {cc.con.wake[0],                 POLLIN, 0},
+        };
+        if (poll(pfd, 2, -1) < 0) {
             if (errno == EINTR) {
                 continue;
             }
@@ -223,10 +221,31 @@ console(void *arg)
             cc.stop = -2;
             break;
         }
-        if (pfd.revents) {
+        if (pfd[1].revents) {
             char drained[64];
             while (read(cc.con.wake[0], drained, sizeof drained) > 0) {
             }
+        }
+        if (!pfd[0].revents) {
+            continue;
+        }
+        unsigned char buf[256];
+        ssize_t n = read(STDIN_FILENO, buf, sizeof buf);
+        if (n < 0) {
+            if (errno == EINTR || errno == EAGAIN) {
+                continue;
+            }
+            perror("read");
+            cc.stop = -2;
+            break;
+        }
+        if (!n) {
+            submit();
+            cc.con.eof = 1;
+            continue;
+        }
+        for (ssize_t i = 0; i < n && !cc.stop && !cc.con.eof; i++) {
+            con_key(buf[i]);
         }
     }
     return NULL;

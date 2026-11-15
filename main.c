@@ -146,6 +146,7 @@ main(void)
             show_received(c, &f);
         }
     }
+    con_input(c);
     con_close();
     if (c->count) {
         con_post("%zu queued line(s) still unconfirmed", c->count);
