@@ -7,7 +7,6 @@
 #include <unistd.h>
 
 struct state cc = {
-    .chat.mx = PTHREAD_MUTEX_INITIALIZER,
     .con.mx = PTHREAD_MUTEX_INITIALIZER,
     .mdm = {
         .mx = PTHREAD_MUTEX_INITIALIZER,

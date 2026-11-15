@@ -43,12 +43,12 @@ con_line(char out[OUT_TEXT], const char *s, size_t n)
 }
 
 static unsigned
-prompt_rows(void)
+prompt_rows(const char *edit, size_t nedit)
 {
     unsigned col = 4;
     unsigned width = cc.con.columns ? cc.con.columns : 80;
-    for (size_t i = 0; i < cc.con.nedit; i++) {
-        if (((uint8_t)cc.con.edit[i] & 0xC0) != 0x80) {
+    for (size_t i = 0; i < nedit; i++) {
+        if (((uint8_t)edit[i] & 0xC0) != 0x80) {
             col++;
         }
     }
@@ -72,11 +72,15 @@ void
 con_show(void)
 {
     char buf[OUT_MAX][OUT_TEXT];
+    char edit[LINE_BYTES + 1];
     pthread_mutex_lock(&cc.con.mx);
     size_t n = cc.con.count;
     for (size_t i = 0; i < n; i++) {
         strcpy(buf[i], cc.con.out[(cc.con.head + i) % OUT_MAX]);
     }
+    size_t nedit = cc.con.nedit;
+    memcpy(edit, cc.con.edit, nedit);
+    edit[nedit] = 0;
     cc.con.head = cc.con.count = 0;
     pthread_mutex_unlock(&cc.con.mx);
     struct winsize ws;
@@ -90,9 +94,9 @@ con_show(void)
     }
     if (cc.con.raw && !cc.con.done) {
         char prompt[OUT_TEXT];
-        con_line(prompt, cc.con.edit, cc.con.nedit);
+        con_line(prompt, edit, nedit);
         fputs(prompt, stdout);
-        cc.con.rows = prompt_rows();
+        cc.con.rows = prompt_rows(edit, nedit);
     }
     fflush(stdout);
 }
@@ -112,29 +116,25 @@ restore_terminal(void)
 static void
 submit(struct chat *c)
 {
+    char edit[LINE_BYTES];
+    pthread_mutex_lock(&cc.con.mx);
     size_t len = cc.con.nedit;
     int rejected = cc.con.nover;
+    memcpy(edit, cc.con.edit, len);
     cc.con.nedit = cc.con.nover = 0;
+    pthread_mutex_unlock(&cc.con.mx);
     if (rejected) {
         con_post("line rejected: more than %d bytes", LINE_BYTES);
-        return;
-    }
-    if (!len) {
-        return;
-    }
-    pthread_mutex_lock(&c->mx);
-    int ok = enqueue(c, cc.con.edit, len);
-    pthread_mutex_unlock(&c->mx);
-    if (ok) {
+    } else if (len && enqueue(c, edit, len)) {
         char record[OUT_TEXT];
-        con_line(record, cc.con.edit, len);
+        con_line(record, edit, len);
         con_post("%s", record);
-    } else {
+    } else if (len) {
         con_post("line rejected: queue full");
     }
 }
 
-void
+static void
 con_key(struct chat *c, unsigned char ch)
 {
     if (cc.con.raw && ch == 20) {
@@ -146,6 +146,7 @@ con_key(struct chat *c, unsigned char ch)
     } else if (ch == '\n' || ch == '\r') {
         submit(c);
     } else if (cc.con.raw && (ch == 8 || ch == 127)) {
+        pthread_mutex_lock(&cc.con.mx);
         if (cc.con.nover) {
             cc.con.nover--;
         } else if (cc.con.nedit) {
@@ -154,29 +155,67 @@ con_key(struct chat *c, unsigned char ch)
             } while (cc.con.nedit &&
                      ((uint8_t)cc.con.edit[cc.con.nedit] & 0xC0) == 0x80);
         }
+        pthread_mutex_unlock(&cc.con.mx);
     } else if (ch >= 32 && ch != 127) {
+        pthread_mutex_lock(&cc.con.mx);
         if (cc.con.nedit == LINE_BYTES) {
             cc.con.nover++;
         } else {
             cc.con.edit[cc.con.nedit++] = ch;
         }
+        pthread_mutex_unlock(&cc.con.mx);
     }
+}
+
+void
+con_input(struct chat *c)
+{
+    if (cc.con.eof) {
+        return;
+    }
+    struct pollfd pfd = { STDIN_FILENO, POLLIN, 0 };
+    int ready = poll(&pfd, 1, 0);
+    if (ready < 0) {
+        if (errno != EINTR) {
+            perror("poll");
+            cc.stop = -2;
+        }
+        return;
+    }
+    if (!ready || !pfd.revents) {
+        return;
+    }
+    unsigned char buf[256];
+    ssize_t n = read(STDIN_FILENO, buf, sizeof buf);
+    if (n < 0) {
+        if (errno != EINTR && errno != EAGAIN) {
+            perror("read");
+            cc.stop = -2;
+        }
+        return;
+    }
+    if (!n) {
+        submit(c);
+        cc.con.eof = 1;
+    } else {
+        for (ssize_t i = 0; i < n && !cc.stop && !cc.con.eof; i++) {
+            con_key(c, buf[i]);
+        }
+    }
+    con_wake();
 }
 
 static void *
 console(void *arg)
 {
-    struct chat *c = arg;
+    (void)arg;
     for (;;) {
         con_show();
         if (cc.con.done) {
             break;
         }
-        struct pollfd pfd[2] = {
-            {cc.con.eof ? -1 : STDIN_FILENO, POLLIN, 0},
-            {cc.con.wake[0],                 POLLIN, 0},
-        };
-        if (poll(pfd, 2, -1) < 0) {
+        struct pollfd pfd = { cc.con.wake[0], POLLIN, 0 };
+        if (poll(&pfd, 1, -1) < 0) {
             if (errno == EINTR) {
                 continue;
             }
@@ -184,39 +223,17 @@ console(void *arg)
             cc.stop = -2;
             break;
         }
-        if (pfd[1].revents) {
+        if (pfd.revents) {
             char drained[64];
             while (read(cc.con.wake[0], drained, sizeof drained) > 0) {
             }
-        }
-        if (!pfd[0].revents) {
-            continue;
-        }
-        unsigned char buf[256];
-        ssize_t r = read(STDIN_FILENO, buf, sizeof buf);
-        if (r < 0) {
-            if (errno == EINTR || errno == EAGAIN) {
-                continue;
-            }
-            perror("read");
-            cc.stop = -2;
-            break;
-        }
-        if (!r) {
-            submit(c);
-            cc.con.eof = 1;
-            continue;
-        }
-        size_t n = r;
-        for (size_t i = 0; i < n && !cc.stop && !cc.con.eof; i++) {
-            con_key(c, buf[i]);
         }
     }
     return NULL;
 }
 
 void
-con_open(struct chat *c)
+con_open(void)
 {
     setvbuf(stdout, NULL, _IOLBF, 0);
     struct winsize ws;
@@ -232,7 +249,7 @@ con_open(struct chat *c)
         t.c_cc[VTIME] = 0;
         cc.con.raw = !tcsetattr(STDIN_FILENO, TCSANOW, &t);
     }
-    int err = pthread_create(&cc.con.tid, NULL, console, c);
+    int err = pthread_create(&cc.con.tid, NULL, console, NULL);
     if (err) {
         die("pthread_create", err);
     }

@@ -1,7 +1,15 @@
-#include "common.h"
+#include "protocol.h"
 
 #include <inttypes.h>
 #include <string.h>
+
+void
+chat_init(struct chat *c, uint32_t id)
+{
+    memset(c, 0, sizeof *c);
+    c->id = id;
+    c->sent_slot = c->fast_slot = UINT64_MAX;
+}
 
 struct message *
 pending(struct chat *c)
