@@ -41,14 +41,10 @@ stats(const struct chat *c)
 static void
 show_received(struct chat *c, const struct frame *f)
 {
-    pthread_mutex_lock(&c->mx);
-    c->ack_src = f->src;
-    c->ack_event = f->seq;
     struct remote *r = receive(c, f, now() / SLOT_NS);
     if (r) {
         con_post("%08" PRIx32 "> %.*s", r->id, r->len, r->data);
     }
-    pthread_mutex_unlock(&c->mx);
 }
 
 static void
@@ -83,24 +79,22 @@ main(void)
 {
     cc.dbg = !!getenv("DEBUG");
     struct chat *c = &cc.chat;
-    c->id = mix(now() ^ ((uint64_t)getpid() << 32) ^ (uintptr_t)c);
+    chat_init(c, mix(now() ^ ((uint64_t)getpid() << 32) ^ (uintptr_t)c));
     if (!c->id) {
         c->id = 1;
     }
     install_signals();
-    con_open(c);
+    con_open();
     modem_open();
     uint64_t first = now() / SLOT_NS + 1;
-    uint64_t last = UINT64_MAX;
-    uint64_t quick = UINT64_MAX;
     uint64_t received_at = UINT64_MAX;
     uint64_t eof_deadline = UINT64_MAX;
     while (!cc.stop) {
+        con_input(c);
         uint64_t slot = now() / SLOT_NS;
         struct frame f;
         int transmit = 0;
         int response = 0;
-        pthread_mutex_lock(&c->mx);
         tick(c, slot);
         int acks = 0;
         for (size_t i = 0; i < PEER_MAX; i++) {
@@ -113,31 +107,12 @@ main(void)
         if (atomic_exchange(&cc.con.req, 0)) {
             stats(c);
         }
-        int fast = quick == slot;
-        quick = UINT64_MAX;
-        int fresh_ack = 0;
-        if (fast && c->ack_src) {
-            for (size_t i = 0; i < PEER_MAX; i++) {
-                struct remote *r = &c->peers[i];
-                fresh_ack |= r->id == c->ack_src && r->ack && r->ack_seq == c->ack_event;
-            }
+        if (!done && slot >= first) {
+            int ack_only = cc.con.eof && !c->count && acks;
+            transmit = select_frame(c, slot, &f, ack_only, &response);
+        } else {
+            c->fast_slot = UINT64_MAX;
         }
-        if (!done && slot >= first && slot != last) {
-            if (cc.con.eof && !c->count && acks) {
-                c->ack_src = 0;
-                transmit = make_frame(c, slot, &f, 1);
-                response = fast && transmit;
-            } else {
-                if (fast) {
-                    transmit = make_frame(c, slot, &f, 1);
-                    response = transmit != 0;
-                }
-                if (!transmit && !fresh_ack) {
-                    transmit = make_frame(c, slot, &f, 0);
-                }
-            }
-        }
-        pthread_mutex_unlock(&c->mx);
         if (done) {
             break;
         }
@@ -149,7 +124,6 @@ main(void)
             } else if (hear(&f, quiet, deadline)) {
                 received_at = now();
                 show_received(c, &f);
-                quick = now() / SLOT_NS;
                 continue;
             }
         }
@@ -159,14 +133,10 @@ main(void)
             if (sent == 2) {
                 received_at = now();
                 show_received(c, &incoming);
-                quick = now() / SLOT_NS;
                 continue;
             }
             if (sent >= 0) {
-                last = slot;
-                pthread_mutex_lock(&c->mx);
                 sent_frame(c, &f, slot, sent);
-                pthread_mutex_unlock(&c->mx);
                 continue;
             }
         }
@@ -174,9 +144,9 @@ main(void)
         if (hear(&f, deadline, deadline)) {
             received_at = now();
             show_received(c, &f);
-            quick = now() / SLOT_NS;
         }
     }
+    con_input(c);
     con_close();
     if (c->count) {
         con_post("%zu queued line(s) still unconfirmed", c->count);

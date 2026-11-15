@@ -6,6 +6,18 @@
 #include <sys/mman.h>
 #include <unistd.h>
 
+static uint32_t
+probe_read32(const volatile uint32_t *p)
+{
+    return *p;
+}
+
+static void
+probe_read64(const volatile void *p)
+{
+    (void)*(const volatile uint64_t *)p;
+}
+
 static void
 spin_until(uint64_t end)
 {
@@ -52,7 +64,7 @@ rx_half(uint64_t start, uint64_t end, double *out)
         uint64_t elapsed = t0;
         while (hops < RX_BATCH_HOPS) {
             for (size_t j = 0; j < 32; j++) {
-                cur = air_read32(&cc.mdm.ring[cur]);
+                cur = probe_read32(&cc.mdm.ring[cur]);
             }
             hops += 32;
             elapsed = now();
@@ -71,41 +83,24 @@ rx_half(uint64_t start, uint64_t end, double *out)
 }
 
 static int
-rx_bit(uint64_t at, double *ratio)
+rx_symbol(uint64_t at, double *first, double *second, double *ratio)
 {
-    double a;
-    double b;
     if (ratio) {
         *ratio = BUSY_RATIO + 1;
     }
     if (now() > at + SYMBOL_NS / 8) {
         cc.cnt.late++;
     }
-    int first = rx_half(at, at + SYMBOL_NS / 2, &a);
-    int second = rx_half(at + SYMBOL_NS / 2, at + SYMBOL_NS, &b);
+    int ok1 = rx_half(at, at + SYMBOL_NS / 2, first);
+    int ok2 = rx_half(at + SYMBOL_NS / 2, at + SYMBOL_NS, second);
     spin_until(at + SYMBOL_NS);
-    if (!first || !second) {
-        return -1;
+    if (!ok1 || !ok2) {
+        return 0;
     }
-    if (ratio && a > 0 && b > 0) {
-        *ratio = a > b ? a / b : b / a;
+    if (ratio && *first > 0 && *second > 0) {
+        *ratio = air_load_ratio(*first, *second);
     }
-    return a > b;
-}
-
-static int
-rx_byte(uint64_t *at)
-{
-    int byte = 0;
-    for (unsigned i = 0; i < 8 && !cc.stop; i++) {
-        int b = rx_bit(*at, NULL);
-        *at += SYMBOL_NS;
-        if (b < 0) {
-            return -1;
-        }
-        byte |= b << i;
-    }
-    return cc.stop ? -1 : byte;
+    return 1;
 }
 
 static void
@@ -120,66 +115,66 @@ static int
 receive_air(struct frame *f, uint64_t quiet, uint64_t deadline, uint64_t sense, double w[BUSY_SYMBOLS])
 {
     int synced = 0;
-    uint64_t at = cc.mdm.rx.next;
+    struct rx *r = &cc.mdm.rx;
+    uint64_t at = r->next;
     if (!at || at < now() / SYMBOL_NS * SYMBOL_NS || at > next_symbol()) {
-        cc.mdm.rx.hist = 0;
+        air_rx_reset(r);
         resync();
         at = now() / SYMBOL_NS * SYMBOL_NS;
     }
     while (!cc.stop && now() < quiet) {
-        double ratio;
-        int b = rx_bit(at, &ratio);
-        cc.mdm.rx.next = at + SYMBOL_NS;
+        double ratio, first, second;
+        int ok = rx_symbol(at, &first, &second, &ratio);
+        r->next = at + SYMBOL_NS;
         if (w && at >= sense && at < sense + BUSY_SYMBOLS * SYMBOL_NS) {
             w[(at - sense) / SYMBOL_NS] = ratio;
         }
-        if (b < 0) {
-            cc.mdm.rx.hist = 0;
-            resync();
-            at = now() / SYMBOL_NS * SYMBOL_NS;
-            cc.mdm.rx.next = at;
+        at = r->next;
+        if (!ok) {
+            int in_frame = r->synced;
+            int in_payload = r->length_done;
+            air_rx_reset(r);
+            if (in_frame) {
+                cc.cnt.rx_bad++;
+                dbg(in_payload ? "sync; frame rejected" : "frame cut off");
+            }
+            if (!in_frame || in_payload) {
+                resync();
+                at = now() / SYMBOL_NS * SYMBOL_NS;
+                r->next = at;
+            }
             continue;
         }
-        cc.mdm.rx.hist = (cc.mdm.rx.hist << 1 | b) & 0x3FFF;
-        if (cc.mdm.rx.hist != SYNC) {
-            at = cc.mdm.rx.next;
-            continue;
-        }
-        quiet = deadline;
-        synced = 1;
-        cc.cnt.sync++;
-        at = cc.mdm.rx.next;
-        b = rx_byte(&at);
-        cc.mdm.rx.next = at;
-        if (b < FRAME_HDR + 4 || b > FRAME_MAX || at + b * 8 * SYMBOL_NS > deadline) {
+        switch (air_recv(r, f, first, second)) {
+        case AIR_RX_WAIT:
+        case AIR_RX_BYTE:
+            break;
+        case AIR_RX_SYNC:
+            quiet = deadline;
+            synced = 1;
+            cc.cnt.sync++;
+            break;
+        case AIR_RX_LENGTH:
+            if (at + (uint64_t)r->length * 8 * SYMBOL_NS > deadline) {
+                cc.cnt.rx_bad++;
+                dbg("frame cut off");
+                air_rx_reset(r);
+            }
+            break;
+        case AIR_RX_BAD_LENGTH:
+        case AIR_RX_OVERFLOW:
             cc.cnt.rx_bad++;
             dbg("frame cut off");
-            cc.mdm.rx.hist = 0;
-            continue;
-        }
-        size_t n = b;
-        uint8_t bytes[FRAME_MAX];
-        size_t i;
-        for (i = 0; i < n; i++) {
-            b = rx_byte(&at);
-            cc.mdm.rx.next = at;
-            if (b < 0) {
-                break;
-            }
-            bytes[i] = b;
-        }
-        cc.mdm.rx.hist = 0;
-        if (i == n && unpack(f, bytes, n)) {
+            air_rx_reset(r);
+            break;
+        case AIR_RX_REJECT:
+            cc.cnt.rx_bad++;
+            dbg("sync; frame rejected");
+            break;
+        case AIR_RX_FRAME:
             cc.cnt.rx++;
-            dbg("sync; frame ok n=%zu", n);
+            dbg("sync; frame ok n=%zu", r->count);
             return 1;
-        }
-        cc.cnt.rx_bad++;
-        dbg("sync; frame rejected");
-        if (i < n) {
-            resync();
-            at = now() / SYMBOL_NS * SYMBOL_NS;
-            cc.mdm.rx.next = at;
         }
     }
     return synced ? -1 : 0;
@@ -194,7 +189,7 @@ hear(struct frame *f, uint64_t quiet, uint64_t deadline)
 static int
 emit_bits(const uint8_t *bytes, size_t n, uint64_t at, uint64_t deadline)
 {
-    uint8_t bits[8 * FRAME_MAX + 32];
+    uint8_t bits[AIR_BIT_HEADER + 8 * FRAME_MAX];
     size_t nb = air_encode(bits, bytes, n);
     for (size_t i = 0; i < nb; i++, at += SYMBOL_NS) {
         if (cc.stop || at > deadline || SYMBOL_NS > deadline - at) {
@@ -205,23 +200,15 @@ emit_bits(const uint8_t *bytes, size_t n, uint64_t at, uint64_t deadline)
             sweep_set(0, 0);
             return 0;
         }
-        sweep_set(bits[i], at + SYMBOL_NS / 2);
+        sweep_set(air_symbol_busy(bits[i], 0), at + SYMBOL_NS / 2);
         spin_until(at + SYMBOL_NS / 2);
-        sweep_set(!bits[i], at + SYMBOL_NS);
+        sweep_set(air_symbol_busy(bits[i], 1), at + SYMBOL_NS);
         spin_until(at + SYMBOL_NS);
         sweep_set(0, 0);
     }
     return 1;
 }
 
-static int
-carrier_clear(double w[BUSY_SYMBOLS])
-{
-    if (w[BUSY_SYMBOLS - 1] > BUSY_RATIO) {
-        return 0;
-    }
-    return air_median(w, BUSY_SYMBOLS) <= BUSY_RATIO;
-}
 
 static int
 clear_to_send(uint32_t id, uint64_t slot, struct frame *incoming)
@@ -238,7 +225,7 @@ clear_to_send(uint32_t id, uint64_t slot, struct frame *incoming)
     if (received < 0) {
         return 0;
     }
-    return carrier_clear(w);
+    return air_channel_clear(w, BUSY_SYMBOLS);
 }
 
 static int
@@ -303,8 +290,8 @@ sweep(void *arg)
                 if (!(k & 255) && k && now() >= until) {
                     break;
                 }
-                air_read64(buf + off);
-                off += 64;
+                probe_read64(buf + off);
+                off += CACHE_LINE_BYTES;
                 if (off >= SWEEP_BYTES) {
                     off = 0;
                 }
@@ -342,7 +329,7 @@ allocate(size_t size)
 void
 modem_open(void)
 {
-    size_t lines = PROBE_BYTES / 64;
+    size_t lines = PROBE_BYTES / CACHE_LINE_BYTES;
     uint32_t *order = malloc(lines * sizeof *order);
     if (!order) {
         die("malloc", errno);

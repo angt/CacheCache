@@ -1,4 +1,4 @@
-#include "common.h"
+#include "protocol.h"
 
 #include <inttypes.h>
 #include <string.h>
@@ -18,6 +18,9 @@ text_valid(const void *v, size_t n)
 struct remote *
 receive(struct chat *c, const struct frame *f, uint64_t slot)
 {
+    c->fast_slot = slot;
+    c->ack_src = f->src;
+    c->ack_event = f->seq;
     if (f->src == c->id) {
         return NULL;
     }
@@ -206,10 +209,45 @@ make_frame(struct chat *c, uint64_t slot, struct frame *f, int ack_now)
     return rank ? 2 : 1;
 }
 
+int
+select_frame(struct chat *c, uint64_t slot, struct frame *f, int ack_only,
+             int *response)
+{
+    int fast = c->fast_slot == slot;
+    c->fast_slot = UINT64_MAX;
+    *response = 0;
+    if (c->sent_slot == slot) {
+        return 0;
+    }
+    if (ack_only) {
+        c->ack_src = 0;
+        int transmit = make_frame(c, slot, f, 1);
+        *response = fast && transmit;
+        return transmit;
+    }
+    int fresh_ack = 0;
+    if (fast && c->ack_src) {
+        for (size_t i = 0; i < PEER_MAX; i++) {
+            struct remote *r = &c->peers[i];
+            fresh_ack |= r->id == c->ack_src && r->ack && r->ack_seq == c->ack_event;
+        }
+    }
+    int transmit = 0;
+    if (fast) {
+        transmit = make_frame(c, slot, f, 1);
+        *response = transmit != 0;
+    }
+    if (!transmit && !fresh_ack) {
+        transmit = make_frame(c, slot, f, 0);
+    }
+    return transmit;
+}
+
 void
 sent_frame(struct chat *c, const struct frame *f, uint64_t slot, int complete)
 {
     c->sent++;
+    c->sent_slot = slot;
     c->hello = slot + (live_peers(c) ? HELLO_SLOTS : DISCOVER_SLOTS);
     if (complete && (f->flags & PIGGY)) {
         for (size_t i = 0; i < PEER_MAX; i++) {
