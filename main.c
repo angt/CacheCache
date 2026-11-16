@@ -90,6 +90,7 @@ main(void)
     uint64_t received_at = UINT64_MAX;
     uint64_t eof_deadline = UINT64_MAX;
     while (!cc.stop) {
+        int eof = cc.con.eof;
         con_input(c);
         uint64_t slot = now() / SLOT_NS;
         struct frame f;
@@ -100,15 +101,15 @@ main(void)
         for (size_t i = 0; i < PEER_MAX; i++) {
             acks |= c->peers[i].ack;
         }
-        if (cc.con.eof && !c->count && eof_deadline == UINT64_MAX) {
+        if (eof && !c->count && eof_deadline == UINT64_MAX) {
             eof_deadline = slot + EOF_ACK_SLOTS;
         }
-        int done = cc.con.eof && !c->count && (!acks || slot >= eof_deadline);
+        int done = eof && !c->count && (!acks || slot >= eof_deadline);
         if (atomic_exchange(&cc.con.req, 0)) {
             stats(c);
         }
         if (!done && slot >= first) {
-            int ack_only = cc.con.eof && !c->count && acks;
+            int ack_only = eof && !c->count && acks;
             transmit = select_frame(c, slot, &f, ack_only, &response);
         } else {
             c->fast_slot = UINT64_MAX;
