@@ -20,7 +20,6 @@
 _Static_assert(ATOMIC_INT_LOCK_FREE == 2, "signal flag must be lock-free");
 
 struct con_line {
-    struct con_line *next;
     char data[LINE_BYTES];
     uint8_t len;
     int rejected;
@@ -28,13 +27,14 @@ struct con_line {
 
 struct con {
     struct termios sv;
-    int raw;
+    int raw, batch, escape, rejected;
     unsigned rows, columns;
     size_t nover, nedit;
     char edit[LINE_BYTES + 1];
     _Atomic int eof, req, done;
     pthread_mutex_t mx;
-    struct con_line *line_head, *line_tail;
+    struct con_line lines[QUEUE_MAX];
+    size_t line_head, nlines;
     char out[OUT_MAX][OUT_TEXT];
     size_t head, count;
     int wake[2];

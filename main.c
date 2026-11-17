@@ -147,12 +147,15 @@ main(void)
             show_received(c, &f);
         }
     }
-    con_input(c);
     con_close();
+    con_input(c);
     if (c->count) {
         con_post("%zu queued line(s) still unconfirmed", c->count);
     }
     con_show();
     modem_close();
-    return cc.stop > 0 ? 128 + cc.stop : cc.stop == -2;
+    if (cc.stop > 0) {
+        return 128 + cc.stop;
+    }
+    return cc.stop == -2 || (cc.con.batch && (cc.con.rejected || c->fail || c->count));
 }

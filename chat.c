@@ -88,18 +88,26 @@ tick(struct chat *c, uint64_t slot)
             }
             if (here) {
                 m->to[keep++] = m->to[i];
+            } else {
+                c->quiet[c->nquiet++] = m->to[i];
             }
         }
         m->n = keep;
         want = missing(m);
     }
     if (m && m->live && (!want || slot - m->start >= LIFE_SLOTS)) {
-        if (want) {
+        int unconfirmed = want != 0;
+        for (size_t i = 0; i < c->nquiet; i++) {
+            unconfirmed |= !(c->quiet[i].bits & ACK_COMPLETE);
+        }
+        if (unconfirmed) {
             c->fail++;
-            con_post("line #%" PRIu16 " unconfirmed (timed out)", m->seq);
+            con_post("line #%" PRIu16 " unconfirmed (%s)", m->seq,
+                     want ? "timed out" : "peer went quiet");
         } else {
             c->conf++;
         }
+        c->nquiet = 0;
         c->hello = slot;
         c->head = (c->head + 1) % QUEUE_MAX;
         c->count--;
@@ -208,6 +216,15 @@ touch(struct chat *c, uint32_t id, uint64_t slot)
     r->seen = slot;
     struct message *m = pending(c);
     if (m && m->live && add_target(m, id)) {
+        for (size_t i = 0; i < c->nquiet; i++) {
+            if (c->quiet[i].id == id) {
+                if (c->quiet[i].bits & ACK_COMPLETE) {
+                    m->to[m->n - 1].bits = c->quiet[i].bits;
+                }
+                c->quiet[i] = c->quiet[--c->nquiet];
+                break;
+            }
+        }
         m->round = 0;
         m->retry = slot + 1;
     }

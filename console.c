@@ -13,7 +13,7 @@
 static void
 con_wake(void)
 {
-    (void)!write(cc.con.wake[1], "x", 1);
+    while (write(cc.con.wake[1], "x", 1) < 0 && errno == EINTR);
 }
 
 void __attribute__((format(printf, 1, 2)))
@@ -113,42 +113,61 @@ restore_terminal(void)
     cc.con.raw = 0;
 }
 
-static void
+static int
 submit(void)
 {
-    pthread_mutex_lock(&cc.con.mx);
     size_t len = cc.con.nedit;
-    if (len) {
-        struct con_line *line = malloc(sizeof *line);
-        if (!line) {
-            die("malloc", errno);
-        }
-        line->next = NULL;
+    if (!len) {
+        return 1;
+    }
+    pthread_mutex_lock(&cc.con.mx);
+    int full = cc.con.nlines == QUEUE_MAX;
+    if (!full) {
+        size_t tail = (cc.con.line_head + cc.con.nlines) % QUEUE_MAX;
+        struct con_line *line = &cc.con.lines[tail];
         line->len = len;
         line->rejected = !!cc.con.nover;
         memcpy(line->data, cc.con.edit, len);
-        if (cc.con.line_tail) {
-            cc.con.line_tail->next = line;
-        } else {
-            cc.con.line_head = line;
+        cc.con.nlines++;
+    }
+    pthread_mutex_unlock(&cc.con.mx);
+    if (full) {
+        if (cc.con.batch) {
+            return 0;
         }
-        cc.con.line_tail = line;
+        con_post("line rejected: queue full");
     }
     cc.con.nedit = cc.con.nover = 0;
-    pthread_mutex_unlock(&cc.con.mx);
+    return 1;
 }
 
-static void
+static int
 con_key(unsigned char ch)
 {
+    enum { KEY_TEXT, KEY_ESCAPE, KEY_SEQUENCE };
+    if (cc.con.raw) {
+        if (ch == '\033') {
+            cc.con.escape = KEY_ESCAPE;
+            return 1;
+        }
+        if (cc.con.escape == KEY_ESCAPE && (ch == '[' || ch == 'O')) {
+            cc.con.escape = KEY_SEQUENCE;
+            return 1;
+        }
+        if (cc.con.escape == KEY_SEQUENCE && ch >= ' ' && ch <= '~') {
+            if (ch >= '@') {
+                cc.con.escape = KEY_TEXT;
+            }
+            return 1;
+        }
+        cc.con.escape = KEY_TEXT;
+    }
     if (cc.con.raw && ch == 20) {
         cc.con.req = 1;
-        return;
-    }
-    if (cc.con.raw && ch == 4) {
+    } else if (cc.con.raw && ch == 4) {
         cc.stop = -1;
     } else if (ch == '\n' || ch == '\r') {
-        submit();
+        return submit();
     } else if (cc.con.raw && (ch == 8 || ch == 127)) {
         pthread_mutex_lock(&cc.con.mx);
         if (cc.con.nover) {
@@ -169,34 +188,33 @@ con_key(unsigned char ch)
         }
         pthread_mutex_unlock(&cc.con.mx);
     }
+    return 1;
 }
 
 void
 con_input(struct chat *c)
 {
-    for (;;) {
+    for (size_t i = 0; i < QUEUE_MAX; i++) {
         pthread_mutex_lock(&cc.con.mx);
-        struct con_line *line = cc.con.line_head;
-        if (line) {
-            cc.con.line_head = line->next;
-            if (!cc.con.line_head) {
-                cc.con.line_tail = NULL;
-            }
-        }
-        pthread_mutex_unlock(&cc.con.mx);
-        if (!line) {
+        if (!cc.con.nlines || (cc.con.batch && !cc.con.done && c->count == QUEUE_MAX)) {
+            pthread_mutex_unlock(&cc.con.mx);
             return;
         }
-        if (line->rejected) {
+        struct con_line line = cc.con.lines[cc.con.line_head];
+        cc.con.line_head = (cc.con.line_head + 1) % QUEUE_MAX;
+        cc.con.nlines--;
+        pthread_mutex_unlock(&cc.con.mx);
+        if (line.rejected) {
+            cc.con.rejected = 1;
             con_post("line rejected: more than %d bytes", LINE_BYTES);
-        } else if (enqueue(c, line->data, line->len)) {
+        } else if (enqueue(c, line.data, line.len)) {
             char record[OUT_TEXT];
-            con_line(record, line->data, line->len);
+            con_line(record, line.data, line.len);
             con_post("%s", record);
         } else {
+            cc.con.rejected = 1;
             con_post("line rejected: queue full");
         }
-        free(line);
     }
 }
 
@@ -204,14 +222,25 @@ static void *
 console(void *arg)
 {
     (void)arg;
+    unsigned char buf[256];
+    size_t pos = 0, len = 0;
+    int eof = 0;
     for (;;) {
+        while (pos < len && !cc.stop && con_key(buf[pos])) {
+            pos++;
+        }
+        if (eof && !cc.con.eof && submit()) {
+            pthread_mutex_lock(&cc.con.mx);
+            cc.con.eof = !cc.con.nlines;
+            pthread_mutex_unlock(&cc.con.mx);
+        }
         con_show();
-        if (cc.con.done) {
+        if (cc.con.done || cc.stop) {
             break;
         }
         struct pollfd pfd[2] = {
-            {cc.con.eof ? -1 : STDIN_FILENO, POLLIN, 0},
-            {cc.con.wake[0],                 POLLIN, 0},
+            {eof || pos < len ? -1 : STDIN_FILENO, POLLIN, 0},
+            {cc.con.wake[0],                       POLLIN, 0},
         };
         if (poll(pfd, 2, -1) < 0) {
             if (errno == EINTR) {
@@ -229,7 +258,6 @@ console(void *arg)
         if (!pfd[0].revents) {
             continue;
         }
-        unsigned char buf[256];
         ssize_t n = read(STDIN_FILENO, buf, sizeof buf);
         if (n < 0) {
             if (errno == EINTR || errno == EAGAIN) {
@@ -239,14 +267,9 @@ console(void *arg)
             cc.stop = -2;
             break;
         }
-        if (!n) {
-            submit();
-            cc.con.eof = 1;
-            continue;
-        }
-        for (ssize_t i = 0; i < n && !cc.stop && !cc.con.eof; i++) {
-            con_key(buf[i]);
-        }
+        pos = 0;
+        len = (size_t)n;
+        eof = !n;
     }
     return NULL;
 }
@@ -261,7 +284,8 @@ con_open(void)
         die("console pipe", errno);
     }
     atexit(restore_terminal);
-    if (isatty(STDIN_FILENO) && isatty(STDOUT_FILENO) && !tcgetattr(STDIN_FILENO, &cc.con.sv)) {
+    cc.con.batch = !isatty(STDIN_FILENO);
+    if (!cc.con.batch && isatty(STDOUT_FILENO) && !tcgetattr(STDIN_FILENO, &cc.con.sv)) {
         struct termios t = cc.con.sv;
         t.c_lflag &= ~(ICANON | ECHO);
         t.c_cc[VMIN] = 1;

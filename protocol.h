@@ -83,6 +83,11 @@ struct remote {
     int live, known, ok, par, ack, tx_pending;
 };
 
+struct target {
+    uint32_t id;
+    unsigned bits;
+};
+
 struct message {
     uint16_t seq;
     uint8_t len;
@@ -91,10 +96,7 @@ struct message {
     uint64_t start, retry;
     size_t n;
     int live;
-    struct {
-        uint32_t id;
-        unsigned bits;
-    } to[PEER_MAX];
+    struct target to[PEER_MAX];
 };
 
 struct chat {
@@ -109,6 +111,8 @@ struct chat {
         uint32_t next, done;
         uint8_t len;
     } gone[PEER_MAX];
+    struct target quiet[PEER_MAX * (2 + LIFE_SLOTS / QUIET_SLOTS)];
+    size_t nquiet;
     size_t gone_head, head, count;
     int full;
     uint64_t sent, recv, conf, fail, miss;
